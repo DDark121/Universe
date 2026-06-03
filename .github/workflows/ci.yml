@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: universe
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d universe"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/universe
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: test-secret
+      SERVICE_TOKEN_SECRET: service-secret
+      APP_TIMEZONE: Europe/Moscow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install
+        run: |
+          pip install -e .[dev]
+          cd web-admin && npm ci
+          cd ../student-app && npm ci
+          cd ../web-admin && npx playwright install --with-deps chromium
+          cd ../student-app && npx playwright install --with-deps chromium
+      - name: Lint
+        run: ruff check app tests
+      - name: Test
+        run: pytest -q
+      - name: Web Admin
+        run: |
+          cd web-admin
+          npm run test
+          npm run typecheck
+          npm run test:e2e
+          npm run build
+      - name: Student App
+        run: |
+          cd student-app
+          npm run test
+          npm run typecheck
+          npm run test:e2e
+          npm run build

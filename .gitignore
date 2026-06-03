@@ -1,0 +1,45 @@
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+alembic/__pycache__/
+.DS_Store
+*.egg-info/
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+.vite/
+
+# Test and coverage artifacts
+coverage/
+playwright-report/
+test-results/
+
+# Local tool/editor state
+.codex
+.agents/
+.idea/
+.vscode/
+test.excalidraw
+
+# Local data and logs
+*.log
+*.pid
+*.sqlite
+*.sqlite3
+*.db
+
+# Thesis/private documents
+diploma_ai_import_module_thesis/
