@@ -17,10 +17,14 @@ from app.db.models import (
     Discipline,
     Faculty,
     Group,
+    GroupTelegramChat,
     Lesson,
+    NotificationOutbox,
     RiskCard,
     Role,
     StudentGroupMembership,
+    TelegramAccount,
+    TutorGroupAssignment,
     User,
 )
 from app.main import app
@@ -319,6 +323,114 @@ async def test_admin_faq_endpoints_are_read_only_and_markdown_backed(session, ap
 
 
 @pytest.mark.asyncio
+async def test_tutor_broadcast_queues_student_and_group_chat_notifications(session, api_client):
+    curator_role = Role(code=RoleCode.CURATOR, name="Curator")
+    student_role = Role(code=RoleCode.STUDENT, name="Student")
+    tutor = User(username="tutor_broadcast", full_name="Tutor Broadcast", password_hash="x", must_change_password=False)
+    student_one = User(username="broadcast_s1", full_name="Broadcast Student 1", password_hash="x", must_change_password=False)
+    student_two = User(username="broadcast_s2", full_name="Broadcast Student 2", password_hash="x", must_change_password=False)
+    tutor.roles.append(curator_role)
+    student_one.roles.append(student_role)
+    student_two.roles.append(student_role)
+    group = Group(code="TB-101", name="Tutor Broadcast 101")
+    session.add_all([curator_role, student_role, tutor, student_one, student_two, group])
+    await session.flush()
+    session.add_all(
+        [
+            TutorGroupAssignment(tutor_user_id=tutor.id, group_id=group.id, is_active=True),
+            StudentGroupMembership(
+                student_id=student_one.id,
+                group_id=group.id,
+                start_date=utc_now().date(),
+                is_primary=True,
+            ),
+            StudentGroupMembership(
+                student_id=student_two.id,
+                group_id=group.id,
+                start_date=utc_now().date(),
+                is_primary=True,
+            ),
+            TelegramAccount(user_id=student_one.id, telegram_id=700101, username="broadcast_s1"),
+            TelegramAccount(user_id=student_two.id, telegram_id=700102, username="broadcast_s2"),
+            GroupTelegramChat(group_id=group.id, telegram_chat_id=-100700101, title="TB-101 chat"),
+        ]
+    )
+    await session.commit()
+
+    override_user(tutor)
+
+    response = await api_client.post(
+        "/api/v1/admin/tutor/broadcasts",
+        json={"group_id": str(group.id), "message": "Проверьте расписание на неделю"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["recipients"] == 2
+    assert response.json()["group_chat_queued"] is True
+
+    outbox_rows = (
+        await session.execute(
+            select(NotificationOutbox).where(NotificationOutbox.event_type == "tutor_broadcast")
+        )
+    ).scalars().all()
+    assert len(outbox_rows) == 3
+    assert any(row.recipient_telegram_id == -100700101 and row.payload["delivery"] == "group_chat" for row in outbox_rows)
+
+
+@pytest.mark.asyncio
+async def test_admin_panel_assistant_endpoint_uses_llm_reply_for_admin_and_curator(session, api_client, monkeypatch):
+    admin_role = Role(code=RoleCode.ADMIN, name="Admin")
+    curator_role = Role(code=RoleCode.CURATOR, name="Curator")
+    teacher_role = Role(code=RoleCode.TEACHER, name="Teacher")
+    admin = User(username="assistant_admin", full_name="Assistant Admin", password_hash="x", must_change_password=False)
+    curator = User(username="assistant_curator", full_name="Assistant Curator", password_hash="x", must_change_password=False)
+    teacher = User(username="assistant_teacher", full_name="Assistant Teacher", password_hash="x", must_change_password=False)
+    admin.roles.append(admin_role)
+    curator.roles.append(curator_role)
+    teacher.roles.append(teacher_role)
+    session.add_all([admin_role, curator_role, teacher_role, admin, curator, teacher])
+    await session.commit()
+
+    llm_calls = []
+
+    async def fake_panel_llm_reply(**kwargs):
+        llm_calls.append(kwargs)
+        return "Откройте раздел «Рассылки тьютора» и выберите группу."
+
+    monkeypatch.setattr("app.services.faq_ai._generate_panel_llm_reply", fake_panel_llm_reply)
+
+    override_user(curator)
+    response = await api_client.post(
+        "/api/v1/admin/assistant/reply",
+        json={
+            "message": "Как отправить рассылку?",
+            "current_path": "/tutor/pushes",
+            "history": [{"role": "user", "content": "Где отчеты?"}],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "llm"
+    assert "Рассылки тьютора" in response.json()["message"]
+    assert llm_calls[-1]["ctx"].current_path == "/tutor/pushes"
+    assert llm_calls[-1]["history"] == [{"role": "user", "content": "Где отчеты?"}]
+
+    override_user(admin)
+    admin_response = await api_client.post(
+        "/api/v1/admin/assistant/reply",
+        json={"message": "Где импорт расписания?"},
+    )
+    assert admin_response.status_code == 200
+    assert llm_calls[-1]["ctx"].roles == ["admin"]
+
+    override_user(teacher)
+    forbidden = await api_client.post(
+        "/api/v1/admin/assistant/reply",
+        json={"message": "Можно спросить?"},
+    )
+    assert forbidden.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_admin_list_endpoints_accept_page_size_500(session, api_client):
     admin_role = Role(code=RoleCode.ADMIN, name="Admin")
     admin = User(username="admin_lists", full_name="Admin Lists", password_hash="x", must_change_password=False)
@@ -426,3 +538,140 @@ async def test_admin_risk_students_handles_json_reasons_without_duplicates(sessi
     assert len(payload["items"]) == 1
     assert payload["items"][0]["student_id"] == str(student.id)
     assert payload["items"][0]["reasons"] == {"attendance": {"lates": 3}}
+
+
+@pytest.mark.asyncio
+async def test_students_analytics_ranks_best_and_worst_students_for_admin_and_curator(session, api_client):
+    admin_role = Role(code=RoleCode.ADMIN, name="Admin")
+    curator_role = Role(code=RoleCode.CURATOR, name="Curator")
+    student_role = Role(code=RoleCode.STUDENT, name="Student")
+    teacher_role = Role(code=RoleCode.TEACHER, name="Teacher")
+    admin = User(username="student_analytics_admin", full_name="Student Analytics Admin", password_hash="x", must_change_password=False)
+    curator = User(
+        username="student_analytics_curator",
+        full_name="Student Analytics Curator",
+        password_hash="x",
+        must_change_password=False,
+    )
+    teacher = User(username="student_analytics_teacher", full_name="Student Analytics Teacher", password_hash="x", must_change_password=False)
+    good_student = User(username="student_analytics_good", full_name="Good Student", password_hash="x", must_change_password=False)
+    bad_student = User(username="student_analytics_bad", full_name="Bad Student", password_hash="x", must_change_password=False)
+    admin.roles.append(admin_role)
+    curator.roles.append(curator_role)
+    teacher.roles.append(teacher_role)
+    good_student.roles.append(student_role)
+    bad_student.roles.append(student_role)
+
+    group = Group(code="AN-1", name="Analytics Group")
+    foreign_group = Group(code="AN-2", name="Foreign Analytics Group")
+    discipline = Discipline(code="AN-DB", name="Analytics Databases")
+    session.add_all(
+        [
+            admin_role,
+            curator_role,
+            student_role,
+            teacher_role,
+            admin,
+            curator,
+            teacher,
+            good_student,
+            bad_student,
+            group,
+            foreign_group,
+            discipline,
+        ]
+    )
+    await session.flush()
+
+    now = utc_now()
+    lesson_one = Lesson(
+        group_id=group.id,
+        discipline_id=discipline.id,
+        teacher_id=teacher.id,
+        starts_at=now,
+        ends_at=now + timedelta(hours=1),
+        room="A-401",
+        status=LessonStatus.COMPLETED,
+        window_start_offset_minutes=-5,
+        window_duration_minutes=20,
+        late_threshold_minutes=10,
+    )
+    lesson_two = Lesson(
+        group_id=group.id,
+        discipline_id=discipline.id,
+        teacher_id=teacher.id,
+        starts_at=now + timedelta(hours=2),
+        ends_at=now + timedelta(hours=3),
+        room="A-402",
+        status=LessonStatus.COMPLETED,
+        window_start_offset_minutes=-5,
+        window_duration_minutes=20,
+        late_threshold_minutes=10,
+    )
+    session.add_all([lesson_one, lesson_two])
+    await session.flush()
+
+    session.add_all(
+        [
+            TutorGroupAssignment(tutor_user_id=curator.id, group_id=group.id, is_active=True),
+            StudentGroupMembership(student_id=good_student.id, group_id=group.id, start_date=now.date(), is_primary=True),
+            StudentGroupMembership(student_id=bad_student.id, group_id=group.id, start_date=now.date(), is_primary=True),
+            AttendanceRecord(
+                lesson_id=lesson_one.id,
+                student_id=good_student.id,
+                status=AttendanceStatus.PRESENT,
+                source=AttendanceSource.QR,
+                marked_at=now,
+            ),
+            AttendanceRecord(
+                lesson_id=lesson_two.id,
+                student_id=good_student.id,
+                status=AttendanceStatus.PRESENT,
+                source=AttendanceSource.QR,
+                marked_at=now,
+            ),
+            AttendanceRecord(
+                lesson_id=lesson_one.id,
+                student_id=bad_student.id,
+                status=AttendanceStatus.ABSENT,
+                source=AttendanceSource.AUTO_ABSENCE,
+                marked_at=now,
+                is_excused=False,
+            ),
+            AttendanceRecord(
+                lesson_id=lesson_two.id,
+                student_id=bad_student.id,
+                status=AttendanceStatus.LATE,
+                source=AttendanceSource.QR,
+                marked_at=now,
+            ),
+        ]
+    )
+    await session.commit()
+
+    override_user(admin)
+    response = await api_client.get(
+        "/api/v1/admin/analytics/students",
+        params={"date_from": str(now.date()), "date_to": str(now.date()), "limit": "2"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_students"] == 2
+    assert payload["total_marks"] == 4
+    assert payload["best"][0]["student_id"] == str(good_student.id)
+    assert payload["worst"][0]["student_id"] == str(bad_student.id)
+    assert payload["worst"][0]["status"] in {"watch", "critical"}
+
+    override_user(curator)
+    curator_response = await api_client.get(
+        "/api/v1/admin/analytics/students",
+        params={"date_from": str(now.date()), "date_to": str(now.date()), "group_id": str(group.id)},
+    )
+    assert curator_response.status_code == 200
+    assert curator_response.json()["total_students"] == 2
+
+    forbidden = await api_client.get(
+        "/api/v1/admin/analytics/students",
+        params={"date_from": str(now.date()), "date_to": str(now.date()), "group_id": str(foreign_group.id)},
+    )
+    assert forbidden.status_code == 403

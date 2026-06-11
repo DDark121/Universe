@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -118,7 +118,7 @@ async def my_lessons(
     if date_from:
         stmt = stmt.where(Lesson.starts_at >= date_from)
     if date_to:
-        stmt = stmt.where(Lesson.starts_at <= date_to)
+        stmt = stmt.where(Lesson.starts_at < date_to + timedelta(days=1))
 
     rows = (await session.execute(stmt.order_by(Lesson.starts_at.asc()))).all()
     return [

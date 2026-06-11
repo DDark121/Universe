@@ -2,6 +2,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 
 import { MENU } from '@/shared/constants/menu'
 import { useAuth } from '@/shared/auth/AuthContext'
+import { AdminAssistantWidget } from '@/shared/ui/AdminAssistantWidget'
 import { Button } from '@/shared/ui/Button'
 
 export function AdminLayout() {
@@ -46,6 +47,7 @@ export function AdminLayout() {
         <main className="page-wrap">
           <Outlet />
         </main>
+        <AdminAssistantWidget roles={roles} userName={session?.user?.full_name} />
       </div>
     </div>
   )

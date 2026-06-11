@@ -455,6 +455,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/assistant/reply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Admin Assistant Reply */
+        post: operations["admin_assistant_reply_api_v1_admin_assistant_reply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/biometric/devices": {
         parameters: {
             query?: never;
@@ -1174,6 +1191,23 @@ export interface paths {
         };
         /** Teachers Analytics */
         get: operations["teachers_analytics_api_v1_admin_analytics_teachers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/analytics/students": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Students Analytics */
+        get: operations["students_analytics_api_v1_admin_analytics_students_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2142,6 +2176,34 @@ export interface components {
          * @enum {string}
          */
         AbsenceReasonType: "illness" | "academic" | "personal" | "other";
+        /** AdminAssistantHistoryMessage */
+        AdminAssistantHistoryMessage: {
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "user" | "assistant";
+            /** Content */
+            content: string;
+        };
+        /** AdminAssistantReplyRequest */
+        AdminAssistantReplyRequest: {
+            /** Message */
+            message: string;
+            /** Current Path */
+            current_path?: string | null;
+            /** History */
+            history?: components["schemas"]["AdminAssistantHistoryMessage"][];
+        };
+        /** AdminAssistantReplyResponse */
+        AdminAssistantReplyResponse: {
+            /** Message */
+            message: string;
+            /** Used Faq Ids */
+            used_faq_ids: string[];
+            /** Status */
+            status: string;
+        };
         /** ApiMessage */
         ApiMessage: {
             /** Message */
@@ -2465,7 +2527,7 @@ export interface components {
          * ExportJobType
          * @enum {string}
          */
-        ExportJobType: "report" | "risk_list";
+        ExportJobType: "report" | "risk_list" | "schedule";
         /** FacultyCreateRequest */
         FacultyCreateRequest: {
             /** Code */
@@ -3003,6 +3065,8 @@ export interface components {
             full_name: string;
             /** Email */
             email?: string | null;
+            /** Phone Number */
+            phone_number?: string | null;
             /** Roles */
             roles: string[];
             /** Is Active */
@@ -3124,6 +3188,8 @@ export interface components {
             username: string;
             /** Email */
             email?: string | null;
+            /** Phone Number */
+            phone_number: string;
             /** Full Name */
             full_name: string;
             /** Roles */
@@ -3140,6 +3206,8 @@ export interface components {
             username: string;
             /** Email */
             email: string | null;
+            /** Phone Number */
+            phone_number: string | null;
             /** Full Name */
             full_name: string;
             /** Roles */
@@ -3158,6 +3226,8 @@ export interface components {
         UserUpdateRequest: {
             /** Email */
             email?: string | null;
+            /** Phone Number */
+            phone_number?: string | null;
             /** Full Name */
             full_name?: string | null;
             /** Is Active */
@@ -4300,6 +4370,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_assistant_reply_api_v1_admin_assistant_reply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminAssistantReplyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminAssistantReplyResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6089,6 +6192,42 @@ export interface operations {
                 date_from: string;
                 date_to: string;
                 teacher_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    students_analytics_api_v1_admin_analytics_students_get: {
+        parameters: {
+            query: {
+                date_from: string;
+                date_to: string;
+                group_id?: string | null;
+                discipline_id?: string | null;
+                teacher_id?: string | null;
+                limit?: number;
             };
             header?: never;
             path?: never;

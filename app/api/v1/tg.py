@@ -442,7 +442,7 @@ async def student_schedule(
     if date_from:
         stmt = stmt.where(Lesson.starts_at >= date_from)
     if date_to:
-        stmt = stmt.where(Lesson.starts_at <= date_to)
+        stmt = stmt.where(Lesson.starts_at < date_to + timedelta(days=1))
     rows = (await session.execute(stmt)).all()
     return [
         {
@@ -576,7 +576,7 @@ async def teacher_lessons(
     if date_from:
         stmt = stmt.where(Lesson.starts_at >= date_from)
     if date_to:
-        stmt = stmt.where(Lesson.starts_at <= date_to)
+        stmt = stmt.where(Lesson.starts_at < date_to + timedelta(days=1))
     rows = (await session.execute(stmt)).all()
     return [
         {

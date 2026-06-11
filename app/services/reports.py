@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from uuid import UUID
 
 from sqlalchemy import and_, case, func, select
@@ -19,7 +19,7 @@ async def attendance_summary(
     discipline_id: UUID | None = None,
     teacher_id: UUID | None = None,
 ) -> dict:
-    conditions = [and_(Lesson.starts_at >= date_from, Lesson.starts_at <= date_to)]
+    conditions = [and_(Lesson.starts_at >= date_from, Lesson.starts_at < date_to + timedelta(days=1))]
 
     if student_id:
         conditions.append(AttendanceRecord.student_id == student_id)

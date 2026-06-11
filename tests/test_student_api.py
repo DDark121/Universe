@@ -234,6 +234,40 @@ async def test_student_mark_qr_attendance_supports_static_and_dynamic_tokens(ses
     )
     assert dynamic_response.status_code == 200
 
+    second_student = User(
+        username="student_dynamic_second",
+        full_name="Second Dynamic Student",
+        password_hash="x",
+        must_change_password=False,
+    )
+    second_student.roles.append(student.roles[0])
+    session.add(second_student)
+    await session.flush()
+    session.add(
+        StudentGroupMembership(
+            student_id=second_student.id,
+            group_id=dynamic_lesson.group_id,
+            start_date=now.date(),
+            is_primary=True,
+        )
+    )
+    await session.commit()
+
+    override_user(second_student)
+    reused_token_response = await api_client.post(
+        "/api/v1/student/attendance/mark-qr",
+        json={"qr_token": dynamic_token},
+    )
+    assert reused_token_response.status_code == 409
+
+    next_dynamic_token, _next_slot = build_dynamic_qr_token(qr_session)
+    assert next_dynamic_token != dynamic_token
+    next_token_response = await api_client.post(
+        "/api/v1/student/attendance/mark-qr",
+        json={"qr_token": next_dynamic_token},
+    )
+    assert next_token_response.status_code == 200
+
 
 @pytest.mark.asyncio
 async def test_student_mark_qr_rejects_closed_window_and_foreign_group(session, api_client):

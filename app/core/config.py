@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     openrouter_api_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_API_BASE_URL")
     openrouter_timeout_seconds: int = Field(default=20, alias="OPENROUTER_TIMEOUT_SECONDS")
     faq_assistant_model: str = Field(
-        default="openai/gpt-4.1-mini",
+        default="google/gemini-2.5-flash-lite",
         alias="FAQ_ASSISTANT_MODEL",
     )
     faq_embeddings_model: str = Field(
@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     attachments_max_size_mb: int = Field(default=10, alias="ATTACHMENTS_MAX_SIZE_MB")
     ai_imports_dir: str = Field(default="/var/lib/universe/ai-imports", alias="AI_IMPORTS_DIR")
     ai_import_max_size_mb: int = Field(default=20, alias="AI_IMPORT_MAX_SIZE_MB")
-    ai_import_model: str = Field(default="openai/gpt-4.1-mini", alias="AI_IMPORT_MODEL")
+    ai_import_model: str = Field(default="google/gemini-2.5-flash-lite", alias="AI_IMPORT_MODEL")
     ai_import_timeout_seconds: int = Field(default=60, alias="AI_IMPORT_TIMEOUT_SECONDS")
     ai_import_max_pages: int = Field(default=20, alias="AI_IMPORT_MAX_PAGES")
     ai_import_max_chars: int = Field(default=40000, alias="AI_IMPORT_MAX_CHARS")

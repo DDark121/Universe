@@ -197,7 +197,12 @@ async def test_tg_exchange_supports_linked_teacher_and_binding_requests_are_idem
 
 
 @pytest.mark.asyncio
-async def test_tg_student_chat_endpoints_return_schedule_faq_and_assistant_reply(session, api_client, faq_storage):
+async def test_tg_student_chat_endpoints_return_schedule_faq_and_assistant_reply(
+    session,
+    api_client,
+    faq_storage,
+    monkeypatch,
+):
     student_role = Role(code=RoleCode.STUDENT, name="Student")
     teacher_role = Role(code=RoleCode.TEACHER, name="Teacher")
     student = User(username="tg_student", full_name="TG Student", password_hash="x", must_change_password=False)
@@ -252,6 +257,11 @@ async def test_tg_student_chat_endpoints_return_schedule_faq_and_assistant_reply
     assert faq_response.status_code == 200
     faq_payload = faq_response.json()
     assert faq_payload[0]["category_name"] == "Регистрация"
+
+    async def fake_llm_reply(**kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.faq_ai._generate_llm_reply", fake_llm_reply)
 
     assistant = await api_client.post(
         "/api/v1/tg/assistant/reply",

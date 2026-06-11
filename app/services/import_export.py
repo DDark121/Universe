@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +38,8 @@ from app.db.models import (
 from app.services.import_apply import (
     ensure_student_membership,
     ensure_teacher_assignment,
+    resolve_discipline,
+    resolve_group,
     resolve_user,
     upsert_lesson,
 )
@@ -74,6 +78,47 @@ def _parse_datetime(value: str) -> datetime:
             continue
     parsed = datetime.fromisoformat(value)
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _generated_code(prefix: str, value: str) -> str:
+    normalized = re.sub(r"[^0-9A-Za-zА-Яа-я_.-]+", "_", value.strip()).strip("_")
+    if normalized:
+        return normalized.upper()[:64]
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:10]
+    return f"{prefix}-{digest}".upper()
+
+
+def _generated_username(full_name: str) -> str:
+    digest = hashlib.sha1(full_name.encode("utf-8")).hexdigest()[:10]
+    return f"teacher_{digest}"
+
+
+def _parse_schedule_datetimes(row: dict[str, Any]) -> tuple[datetime, datetime]:
+    starts_at_raw = _first_value(row, {"starts_at", "начало"})
+    ends_at_raw = _first_value(row, {"ends_at", "конец"})
+    if starts_at_raw and ends_at_raw:
+        return _parse_datetime(starts_at_raw), _parse_datetime(ends_at_raw)
+
+    date_raw = _first_value(row, {"date", "lesson_date", "дата"})
+    start_time_raw = _first_value(row, {"start_time", "time_start", "время_начала", "начало_пары"})
+    end_time_raw = _first_value(row, {"end_time", "time_end", "время_конца", "конец_пары"})
+    if not date_raw or not start_time_raw or not end_time_raw:
+        raise ValueError("starts_at/ends_at or date/start_time/end_time are required")
+
+    date_part = date_raw.strip()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            parsed_date = datetime.strptime(date_part, fmt).date()
+            break
+        except ValueError:
+            parsed_date = None
+    if parsed_date is None:
+        parsed_date = datetime.fromisoformat(date_part).date()
+
+    return (
+        _parse_datetime(f"{parsed_date.isoformat()} {start_time_raw.strip()}"),
+        _parse_datetime(f"{parsed_date.isoformat()} {end_time_raw.strip()}"),
+    )
 
 
 def _load_rows(file_path: str) -> list[dict[str, str]]:
@@ -245,41 +290,58 @@ async def process_import_schedule(session: AsyncSession, job: ImportJob) -> Impo
 
     for index, row in enumerate(rows, start=2):
         try:
-            group_code = _first_value(row, {"group_code", "код_группы", "group"})
-            discipline_code = _first_value(row, {"discipline_code", "код_дисциплины", "discipline"})
-            teacher_username = _first_value(row, {"teacher_username", "логин_преподавателя", "teacher"})
-            starts_at_raw = _first_value(row, {"starts_at", "начало"})
-            ends_at_raw = _first_value(row, {"ends_at", "конец"})
+            group_code = _first_value(row, {"group_code", "код_группы", "group", "группа"})
+            group_name = _first_value(row, {"group_name", "название_группы"})
+            discipline_code = _first_value(row, {"discipline_code", "код_дисциплины"})
+            discipline_name = _first_value(
+                row,
+                {"discipline_name", "discipline", "дисциплина", "предмет", "название_дисциплины"},
+            )
+            teacher_username = _first_value(row, {"teacher_username", "логин_преподавателя"})
+            teacher_full_name = _first_value(row, {"teacher_name", "teacher", "преподаватель", "фио_преподавателя"})
+            teacher_email = _first_value(row, {"teacher_email", "email_преподавателя", "почта_преподавателя"})
+            teacher_phone = _first_value(row, {"teacher_phone", "phone_преподавателя", "телефон_преподавателя"})
             room = _first_value(row, {"room", "аудитория"})
             status_raw = _first_value(row, {"status", "статус"}) or "planned"
 
-            if not group_code or not discipline_code or not teacher_username or not starts_at_raw or not ends_at_raw:
-                raise ValueError("group_code/discipline_code/teacher_username/starts_at/ends_at are required")
+            if not group_code and not group_name:
+                raise ValueError("group_code or group_name is required")
+            if not discipline_code and not discipline_name:
+                raise ValueError("discipline_code or discipline_name is required")
+            if not teacher_username and not teacher_full_name:
+                raise ValueError("teacher_username or teacher_name is required")
 
-            group = (await session.execute(select(Group).where(Group.code == group_code))).scalar_one_or_none()
-            if not group:
-                raise ValueError(f"Unknown group_code '{group_code}'")
+            group_code = group_code or _generated_code("GROUP", group_name or "")
+            group = await resolve_group(
+                session,
+                code=group_code,
+                name=group_name or group_code,
+                action="upsert",
+            )
 
-            discipline = (
-                await session.execute(select(Discipline).where(Discipline.code == discipline_code))
-            ).scalar_one_or_none()
-            if not discipline:
-                raise ValueError(f"Unknown discipline_code '{discipline_code}'")
+            discipline_code = discipline_code or _generated_code("DISC", discipline_name or "")
+            discipline = await resolve_discipline(
+                session,
+                code=discipline_code,
+                name=discipline_name or discipline_code,
+                action="upsert",
+            )
 
+            teacher_username = teacher_username or _generated_username(teacher_full_name or "")
             teacher = await resolve_user(
                 session,
                 username=teacher_username,
-                full_name=None,
-                email=None,
+                full_name=teacher_full_name or teacher_username,
+                email=teacher_email,
                 role_codes=[RoleCode.TEACHER],
-                action="match_existing",
+                phone_number=teacher_phone,
+                action="upsert",
                 role_update_strategy="merge",
             )
             if RoleCode.TEACHER not in {role.code for role in teacher.roles}:
                 raise ValueError("Referenced user has no teacher role")
 
-            starts_at = _parse_datetime(starts_at_raw)
-            ends_at = _parse_datetime(ends_at_raw)
+            starts_at, ends_at = _parse_schedule_datetimes(row)
             if ends_at <= starts_at:
                 raise ValueError("ends_at must be greater than starts_at")
 
@@ -405,6 +467,54 @@ async def build_export_path_async(export_id: UUID, fmt: ExportFormat) -> Path:
 
 async def build_export_rows(session: AsyncSession, job: ExportJob) -> list[dict[str, Any]]:
     filters = job.filters or {}
+    if job.job_type == ExportJobType.SCHEDULE:
+        stmt = (
+            select(Lesson, Group, Discipline, User)
+            .join(Group, Group.id == Lesson.group_id)
+            .join(Discipline, Discipline.id == Lesson.discipline_id)
+            .join(User, User.id == Lesson.teacher_id)
+        )
+        date_from = filters.get("date_from")
+        date_to = filters.get("date_to")
+        if date_from:
+            stmt = stmt.where(Lesson.starts_at >= _parse_datetime(str(date_from)))
+        if date_to:
+            stmt = stmt.where(Lesson.starts_at <= _parse_datetime(str(date_to)))
+        if filters.get("group_id"):
+            stmt = stmt.where(Lesson.group_id == UUID(str(filters["group_id"])))
+        if filters.get("group_code"):
+            stmt = stmt.where(Group.code == str(filters["group_code"]))
+        if filters.get("discipline_id"):
+            stmt = stmt.where(Lesson.discipline_id == UUID(str(filters["discipline_id"])))
+        if filters.get("teacher_id"):
+            stmt = stmt.where(Lesson.teacher_id == UUID(str(filters["teacher_id"])))
+        if filters.get("status"):
+            stmt = stmt.where(Lesson.status == LessonStatus(str(filters["status"])))
+
+        rows = (await session.execute(stmt.order_by(Lesson.starts_at.asc()))).all()
+        return [
+            {
+                "lesson_id": str(lesson.id),
+                "group_id": str(group.id),
+                "group_code": group.code,
+                "group_name": group.name,
+                "discipline_id": str(discipline.id),
+                "discipline_code": discipline.code,
+                "discipline_name": discipline.name,
+                "teacher_id": str(teacher.id),
+                "teacher_username": teacher.username,
+                "teacher_name": teacher.full_name,
+                "starts_at": lesson.starts_at.isoformat(),
+                "ends_at": lesson.ends_at.isoformat(),
+                "date": lesson.starts_at.date().isoformat(),
+                "start_time": lesson.starts_at.strftime("%H:%M"),
+                "end_time": lesson.ends_at.strftime("%H:%M"),
+                "room": lesson.room,
+                "status": lesson.status.value,
+            }
+            for lesson, group, discipline, teacher in rows
+        ]
+
     if job.job_type == ExportJobType.RISK_LIST:
         stmt = (
             select(RiskCard, User)

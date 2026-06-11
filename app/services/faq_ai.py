@@ -21,6 +21,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.enums import BindingRequestStatus
 from app.db.models import TelegramAccount, TelegramBindingRequest, User
+from app.integrations.openrouter_client import OpenRouterError, openrouter_chat_completion
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -81,6 +82,13 @@ class AssistantUserContext:
 
 
 @dataclass(slots=True)
+class PanelAssistantContext:
+    full_name: str
+    roles: list[str]
+    current_path: str | None = None
+
+
+@dataclass(slots=True)
 class FaqChunk:
     item: AssistantFaqContext
     chunk_index: int
@@ -134,13 +142,7 @@ def _faq_vector_available() -> bool:
 
 
 def _faq_llm_available() -> bool:
-    if not settings.faq_assistant_enabled or not settings.openrouter_api_key:
-        return False
-    try:
-        import langchain_openrouter  # noqa: F401
-    except Exception:
-        return False
-    return True
+    return bool(settings.faq_assistant_enabled and settings.openrouter_api_key)
 
 
 def _read_markdown_file(path: Path) -> str | None:
@@ -753,6 +755,81 @@ def _assistant_prompt(user_ctx: AssistantUserContext, faq_items: list[AssistantF
     )
 
 
+def _panel_capabilities() -> str:
+    return (
+        "Админ-панель Universe:\n"
+        "- Дашборд: сводка посещаемости, риски и быстрый обзор.\n"
+        "- Пользователи: создание, контакты, роли admin/teacher/student/curator, архивирование.\n"
+        "- Структура: факультеты, потоки, группы, дисциплины, назначения преподавателей и тьюторов.\n"
+        "- Расписание (/schedule): создание занятий, статусы, аудитории, классический импорт расписания CSV/XLSX.\n"
+        "- Импорт (/imports): классические шаблоны и AI-нормализация документов в draft.\n"
+        "- Экспорт (/exports): выгрузка отчетов, risk-list и расписания.\n"
+        "- Telegram: инвайт-коды, заявки на привязку, групповой чат в карточке группы.\n"
+        "- Рассылки тьютора (/tutor/pushes): curator/admin выбирает закрепленную группу и отправляет текст студентам "
+        "и в групповой чат, если chat ID задан.\n"
+        "- Рассылки преподавателя (/teacher/broadcasts): teacher отправляет сообщения своим учебным группам.\n"
+        "- Отчеты: зона риска (/risk), отчет посещаемости (/reports/attendance), отчет опозданий (/reports/lates), "
+        "отчет пропусков (/reports/absences), карточка студента, аналитика преподавателей.\n"
+        "- Правила: конфиг рейтинга, правила эскалаций, системные настройки, audit log.\n"
+        "Ограничения ролей: admin управляет справочниками и настройками; curator видит закрепленные группы, отчеты, риски, "
+        "аналитику и может отправлять рассылки своим группам."
+    )
+
+
+def _panel_assistant_prompt(ctx: PanelAssistantContext, faq_items: list[AssistantFaqContext]) -> str:
+    faq_block = "\n\n".join(f"[{index + 1}] {item.text}" for index, item in enumerate(faq_items))
+    roles = ", ".join(ctx.roles) if ctx.roles else "unknown"
+    return (
+        "Ты встроенный помощник админ-панели Universe для администраторов и тьюторов.\n"
+        "Отвечай по-русски, коротко и практически. Помогай найти нужный раздел, объясняй последовательность действий, "
+        "указывай ограничения ролей. Не выдумывай функции, которых нет в списке возможностей или FAQ.\n"
+        "Если вопрос требует внешних данных, скажи что их нужно проверить в соответствующем разделе панели.\n"
+        f"Пользователь: {ctx.full_name}.\n"
+        f"Роли: {roles}.\n"
+        f"Текущий путь панели: {ctx.current_path or 'не указан'}.\n"
+        f"{_panel_capabilities()}\n"
+        "FAQ-контекст:\n"
+        f"{faq_block or 'Контекст не найден.'}"
+    )
+
+
+def _panel_fallback_response(message: str, ctx: PanelAssistantContext, faq_items: list[AssistantFaqContext]) -> str:
+    normalized = message.casefold()
+    role_set = set(ctx.roles)
+    if "рассыл" in normalized or "telegram" in normalized or "телег" in normalized:
+        if "curator" in role_set and "admin" not in role_set:
+            return (
+                "Откройте «Рассылки тьютора», выберите закрепленную группу и отправьте текст. "
+                "Сообщение уйдет студентам с привязанным Telegram и в активный групповой чат, если он задан в группе."
+            )
+        return (
+            "Для тьюторской рассылки откройте «Рассылки тьютора». Для настройки чата группы откройте «Группы» "
+            "и заполните Telegram chat ID. Для преподавательских сообщений используется раздел «Рассылки преподавателя»."
+        )
+    if "импорт" in normalized or "ai import" in normalized or "ии импорт" in normalized:
+        return (
+            "Откройте «Импорт». Для AI import выберите файл, режим и календарь семестра, дождитесь draft, "
+            "проверьте найденные группы, пользователей, назначения и расписание, затем примените draft."
+        )
+    if "распис" in normalized or "пары" in normalized:
+        return (
+            "Администратор редактирует пары в «Расписание». Массовая загрузка доступна через импорт CSV/XLSX, "
+            "а выгрузка через «Экспорт» с типом «Расписание»."
+        )
+    if "риск" in normalized or "опозд" in normalized or "пропуск" in normalized:
+        return (
+            "Проверьте «Зона риска», «Отчет опозданий» или «Отчет пропусков». Тьютор увидит только данные "
+            "закрепленных групп, администратор видит все группы."
+        )
+    if faq_items:
+        top = faq_items[0]
+        return f"{top.answer}\n\nРаздел FAQ: {top.category_name}."
+    return (
+        "Я могу подсказать по разделам панели: пользователи, группы, расписание, импорт, экспорт, Telegram, отчеты и риски. "
+        "Уточните, что именно хотите сделать."
+    )
+
+
 async def _generate_llm_reply(
     *,
     telegram_id: int,
@@ -763,33 +840,59 @@ async def _generate_llm_reply(
     if not _faq_llm_available():
         return None
 
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-    from langchain_openrouter import ChatOpenRouter
-
     history = await _read_history(telegram_id)
-    llm = ChatOpenRouter(
-        api_key=settings.openrouter_api_key,
-        base_url=settings.openrouter_api_base_url,
-        model=settings.faq_assistant_model,
-        temperature=0,
-        timeout=settings.openrouter_timeout_seconds,
-    )
-    messages: list[Any] = [SystemMessage(content=_assistant_prompt(user_ctx, faq_items))]
+    messages = [{"role": "system", "content": _assistant_prompt(user_ctx, faq_items)}]
     for item in history[-settings.faq_history_max_messages :]:
         if item["role"] == "assistant":
-            messages.append(AIMessage(content=item["content"]))
+            messages.append({"role": "assistant", "content": item["content"]})
         else:
-            messages.append(HumanMessage(content=item["content"]))
-    messages.append(HumanMessage(content=message))
+            messages.append({"role": "user", "content": item["content"]})
+    messages.append({"role": "user", "content": message})
     try:
-        response = await llm.ainvoke(messages)
-    except Exception as exc:
+        return await openrouter_chat_completion(
+            messages,
+            model=settings.faq_assistant_model,
+            temperature=0,
+            timeout_seconds=settings.openrouter_timeout_seconds,
+            max_tokens=900,
+        )
+    except OpenRouterError as exc:
         logger.warning("faq_llm_reply_failed", reason=str(exc))
         return None
-    content = getattr(response, "content", None)
-    if isinstance(content, str):
-        return content.strip()
-    return None
+
+
+async def _generate_panel_llm_reply(
+    *,
+    message: str,
+    ctx: PanelAssistantContext,
+    faq_items: list[AssistantFaqContext],
+    history: list[dict[str, str]],
+) -> str | None:
+    if not _faq_llm_available():
+        return None
+
+    messages = [{"role": "system", "content": _panel_assistant_prompt(ctx, faq_items)}]
+    for item in history[-settings.faq_history_max_messages :]:
+        role = item.get("role")
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "assistant":
+            messages.append({"role": "assistant", "content": content})
+        else:
+            messages.append({"role": "user", "content": content})
+    messages.append({"role": "user", "content": message})
+    try:
+        return await openrouter_chat_completion(
+            messages,
+            model=settings.faq_assistant_model,
+            temperature=0,
+            timeout_seconds=settings.openrouter_timeout_seconds,
+            max_tokens=900,
+        )
+    except OpenRouterError as exc:
+        logger.warning("panel_assistant_llm_reply_failed", reason=str(exc))
+        return None
 
 
 async def generate_assistant_reply(
@@ -817,4 +920,35 @@ async def generate_assistant_reply(
         "message": reply,
         "used_faq_ids": [item.item_id for item in faq_items],
         "status": user_ctx.status,
+    }
+
+
+async def generate_panel_assistant_reply(
+    session: AsyncSession,
+    *,
+    user: User,
+    message: str,
+    current_path: str | None = None,
+    history: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    normalized_message = message.strip()
+    ctx = PanelAssistantContext(
+        full_name=user.full_name,
+        roles=[role.code.value for role in user.roles],
+        current_path=current_path,
+    )
+    faq_items = await _search_faq_vector(normalized_message)
+    reply = await _generate_panel_llm_reply(
+        message=normalized_message,
+        ctx=ctx,
+        faq_items=faq_items,
+        history=history or [],
+    )
+    status = "llm" if reply else "fallback"
+    if not reply:
+        reply = _panel_fallback_response(normalized_message, ctx, faq_items)
+    return {
+        "message": reply,
+        "used_faq_ids": [item.item_id for item in faq_items],
+        "status": status,
     }

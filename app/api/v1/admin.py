@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
-from datetime import date
+from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -65,6 +65,8 @@ from app.db.models import (
     User,
 )
 from app.schemas.admin import (
+    AdminAssistantReplyRequest,
+    AdminAssistantReplyResponse,
     AssignmentCreateRequest,
     AssignmentUpdateRequest,
     BindingDecisionRequest,
@@ -116,6 +118,7 @@ from app.services.ai_imports import (
 )
 from app.services.audit import log_audit
 from app.services.faq_ai import (
+    generate_panel_assistant_reply,
     get_faq_index_status_async,
     list_faq_categories_async,
     list_faq_item_rows_async,
@@ -207,6 +210,45 @@ async def _active_tutor_group_ids(session: AsyncSession, tutor_user_id: UUID) ->
 
 def _is_admin(user: User) -> bool:
     return any(role.code == RoleCode.ADMIN for role in user.roles)
+
+
+def _date_end_exclusive(value: date) -> date:
+    return value + timedelta(days=1)
+
+
+def _student_period_score(
+    *,
+    total: int,
+    present: int,
+    late: int,
+    absent: int,
+    unexcused_absent: int,
+    rating_score: float | None,
+    risk_score: float | None,
+) -> float:
+    if total <= 0:
+        base_score = rating_score if rating_score is not None else 0
+    else:
+        attended = present + late
+        attendance_pct = attended / total * 100
+        punctuality_pct = present / total * 100
+        penalty = late * 8 + absent * 10 + unexcused_absent * 18
+        discipline_score = max(0, 100 - penalty)
+        base_score = attendance_pct * 0.6 + punctuality_pct * 0.25 + discipline_score * 0.15
+
+    if risk_score is not None:
+        base_score = min(base_score, risk_score)
+    return round(max(0, min(100, base_score)), 2)
+
+
+def _student_analytics_status(score: float, *, total: int, late: int, unexcused_absent: int) -> str:
+    if total <= 0:
+        return "no_data"
+    if score < 60 or unexcused_absent >= 3 or late >= 4:
+        return "critical"
+    if score < 75 or unexcused_absent >= 1 or late >= 2:
+        return "watch"
+    return "stable"
 
 
 async def _ensure_unique_user_contacts(
@@ -1146,16 +1188,54 @@ async def tutor_broadcast(
             payload={"message": payload.message, "group_id": str(payload.group_id)},
             idempotency_key=f"tutor_broadcast:{broadcast.id}:{student_id}",
         )
+
+    group_chat = (
+        await session.execute(
+            select(GroupTelegramChat).where(
+                GroupTelegramChat.group_id == payload.group_id,
+                GroupTelegramChat.is_active.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if group_chat:
+        await enqueue_notification(
+            session,
+            event_type="tutor_broadcast",
+            recipient_user_id=None,
+            recipient_telegram_id=group_chat.telegram_chat_id,
+            payload={"message": payload.message, "group_id": str(payload.group_id), "delivery": "group_chat"},
+            idempotency_key=(
+                f"tutor_group_chat_broadcast:{payload.group_id}:{group_chat.telegram_chat_id}:"
+                f"{hashlib.sha256(payload.message.encode('utf-8')).hexdigest()[:16]}"
+            ),
+        )
+
     await log_audit(
         session,
         actor_user_id=current_user.id,
         action="admin.tutor_broadcast",
         entity_type="broadcast",
         entity_id=str(broadcast.id),
-        details={"group_id": str(payload.group_id), "recipients": len(members)},
+        details={"group_id": str(payload.group_id), "recipients": len(members), "group_chat": bool(group_chat)},
     )
     await session.commit()
-    return {"broadcast_id": broadcast.id, "recipients": len(members)}
+    return {"broadcast_id": broadcast.id, "recipients": len(members), "group_chat_queued": bool(group_chat)}
+
+
+@router.post("/assistant/reply", response_model=AdminAssistantReplyResponse)
+async def admin_assistant_reply(
+    payload: AdminAssistantReplyRequest,
+    current_user: User = Depends(require_roles(RoleCode.ADMIN, RoleCode.CURATOR)),
+    session: AsyncSession = Depends(get_db_session),
+) -> AdminAssistantReplyResponse:
+    reply = await generate_panel_assistant_reply(
+        session,
+        user=current_user,
+        message=payload.message,
+        current_path=payload.current_path,
+        history=[item.model_dump() for item in payload.history],
+    )
+    return AdminAssistantReplyResponse(**reply)
 
 
 @router.post("/biometric/devices")
@@ -1550,7 +1630,7 @@ async def list_lessons(
     if date_from:
         stmt = stmt.where(Lesson.starts_at >= date_from)
     if date_to:
-        stmt = stmt.where(Lesson.starts_at <= date_to)
+        stmt = stmt.where(Lesson.starts_at < _date_end_exclusive(date_to))
     lessons, total = await _paginate_scalars(session, stmt.order_by(Lesson.starts_at.asc()), page=page, page_size=page_size)
     return {
         "items": [
@@ -1995,7 +2075,7 @@ async def list_risk_students(
         if date_from:
             attendance_student_ids = attendance_student_ids.where(Lesson.starts_at >= date_from)
         if date_to:
-            attendance_student_ids = attendance_student_ids.where(Lesson.starts_at <= date_to)
+            attendance_student_ids = attendance_student_ids.where(Lesson.starts_at < _date_end_exclusive(date_to))
         stmt = stmt.where(User.id.in_(attendance_student_ids.distinct()))
 
     stmt = stmt.order_by(RiskCard.updated_at.desc())
@@ -2668,7 +2748,7 @@ async def attendance_report(
                 .where(
                     Lesson.group_id.in_(allowed_group_ids),
                     Lesson.starts_at >= date_from,
-                    Lesson.starts_at <= date_to,
+                    Lesson.starts_at < _date_end_exclusive(date_to),
                 )
             )
             if student_id:
@@ -2722,7 +2802,7 @@ async def lates_report(
         .where(
             AttendanceRecord.status == AttendanceStatus.LATE,
             Lesson.starts_at >= date_from,
-            Lesson.starts_at <= date_to,
+            Lesson.starts_at < _date_end_exclusive(date_to),
         )
     )
     if student_id:
@@ -2781,7 +2861,7 @@ async def absences_report(
         .where(
             AttendanceRecord.status == AttendanceStatus.ABSENT,
             Lesson.starts_at >= date_from,
-            Lesson.starts_at <= date_to,
+            Lesson.starts_at < _date_end_exclusive(date_to),
         )
     )
     if excused is not None:
@@ -2843,7 +2923,7 @@ async def teachers_analytics(
             ).label("attended"),
         )
         .join(AttendanceRecord, AttendanceRecord.lesson_id == Lesson.id)
-        .where(Lesson.starts_at >= date_from, Lesson.starts_at <= date_to)
+        .where(Lesson.starts_at >= date_from, Lesson.starts_at < _date_end_exclusive(date_to))
         .group_by(Lesson.teacher_id)
     )
     if teacher_id:
@@ -2863,6 +2943,208 @@ async def teachers_analytics(
         }
         for row in rows
     ]
+
+
+@router.get("/analytics/students")
+async def students_analytics(
+    date_from: date,
+    date_to: date,
+    group_id: UUID | None = None,
+    discipline_id: UUID | None = None,
+    teacher_id: UUID | None = None,
+    limit: int = Query(default=5, ge=1, le=20),
+    current_user: User = Depends(require_roles(RoleCode.ADMIN, RoleCode.CURATOR)),
+    session: AsyncSession = Depends(get_db_session),
+):
+    if date_to < date_from:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="date_to must be greater than date_from")
+
+    allowed_group_ids: list[UUID] | None = None
+    if not _is_admin(current_user):
+        allowed_group_ids = await _active_tutor_group_ids(session, current_user.id)
+        if not allowed_group_ids:
+            return {
+                "period": {"date_from": date_from, "date_to": date_to},
+                "total_students": 0,
+                "total_marks": 0,
+                "best": [],
+                "worst": [],
+                "items": [],
+            }
+        if group_id and group_id not in allowed_group_ids:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to group")
+
+    membership_stmt = (
+        select(User, StudentGroupMembership, Group)
+        .join(StudentGroupMembership, StudentGroupMembership.student_id == User.id)
+        .join(Group, Group.id == StudentGroupMembership.group_id)
+        .where(
+            StudentGroupMembership.start_date <= date_to,
+            or_(
+                StudentGroupMembership.end_date.is_(None),
+                StudentGroupMembership.end_date >= date_from,
+            ),
+        )
+    )
+    if group_id:
+        membership_stmt = membership_stmt.where(StudentGroupMembership.group_id == group_id)
+    if allowed_group_ids is not None:
+        membership_stmt = membership_stmt.where(StudentGroupMembership.group_id.in_(allowed_group_ids))
+
+    membership_rows = (await session.execute(membership_stmt)).all()
+    students: dict[UUID, dict[str, Any]] = {}
+    for user, membership, group in membership_rows:
+        current = students.get(user.id)
+        if current and not (membership.is_primary and not current["is_primary"]):
+            continue
+        students[user.id] = {
+            "student_id": user.id,
+            "student_name": user.full_name,
+            "username": user.username,
+            "group_id": group.id,
+            "group_code": group.code,
+            "group_name": group.name,
+            "is_primary": membership.is_primary,
+            "present": 0,
+            "late": 0,
+            "absent": 0,
+            "excused_absent": 0,
+            "unexcused_absent": 0,
+        }
+
+    if not students:
+        return {
+            "period": {"date_from": date_from, "date_to": date_to},
+            "total_students": 0,
+            "total_marks": 0,
+            "best": [],
+            "worst": [],
+            "items": [],
+        }
+
+    student_ids = list(students)
+    attendance_stmt = (
+        select(AttendanceRecord, Lesson)
+        .join(Lesson, Lesson.id == AttendanceRecord.lesson_id)
+        .where(
+            AttendanceRecord.student_id.in_(student_ids),
+            Lesson.starts_at >= date_from,
+            Lesson.starts_at < _date_end_exclusive(date_to),
+        )
+    )
+    if group_id:
+        attendance_stmt = attendance_stmt.where(Lesson.group_id == group_id)
+    if allowed_group_ids is not None:
+        attendance_stmt = attendance_stmt.where(Lesson.group_id.in_(allowed_group_ids))
+    if discipline_id:
+        attendance_stmt = attendance_stmt.where(Lesson.discipline_id == discipline_id)
+    if teacher_id:
+        attendance_stmt = attendance_stmt.where(Lesson.teacher_id == teacher_id)
+
+    attendance_rows = (await session.execute(attendance_stmt)).all()
+    for record, _lesson in attendance_rows:
+        bucket = students.get(record.student_id)
+        if not bucket:
+            continue
+        if record.status == AttendanceStatus.PRESENT:
+            bucket["present"] += 1
+        elif record.status == AttendanceStatus.LATE:
+            bucket["late"] += 1
+        elif record.status == AttendanceStatus.ABSENT:
+            bucket["absent"] += 1
+            if record.is_excused:
+                bucket["excused_absent"] += 1
+            else:
+                bucket["unexcused_absent"] += 1
+
+    risk_rows = (
+        await session.execute(
+            select(RiskCard).where(
+                RiskCard.student_id.in_(student_ids),
+                RiskCard.is_active.is_(True),
+            )
+        )
+    ).scalars().all()
+    risks = {row.student_id: row for row in risk_rows}
+
+    rating_rows = (
+        await session.execute(
+            select(RatingSnapshot)
+            .where(RatingSnapshot.student_id.in_(student_ids))
+            .order_by(RatingSnapshot.student_id.asc(), RatingSnapshot.calculated_at.desc())
+        )
+    ).scalars().all()
+    ratings: dict[UUID, RatingSnapshot] = {}
+    for row in rating_rows:
+        ratings.setdefault(row.student_id, row)
+
+    items: list[dict[str, Any]] = []
+    for student_id, row in students.items():
+        total = row["present"] + row["late"] + row["absent"]
+        attended = row["present"] + row["late"]
+        rating = ratings.get(student_id)
+        risk = risks.get(student_id)
+        rating_score = float(rating.score) if rating else None
+        risk_score = float(risk.last_score) if risk else None
+        score = _student_period_score(
+            total=total,
+            present=row["present"],
+            late=row["late"],
+            absent=row["absent"],
+            unexcused_absent=row["unexcused_absent"],
+            rating_score=rating_score,
+            risk_score=risk_score,
+        )
+        items.append(
+            {
+                "student_id": student_id,
+                "student_name": row["student_name"],
+                "username": row["username"],
+                "group_id": row["group_id"],
+                "group_code": row["group_code"],
+                "group_name": row["group_name"],
+                "total_marks": total,
+                "present": row["present"],
+                "late": row["late"],
+                "absent": row["absent"],
+                "excused_absent": row["excused_absent"],
+                "unexcused_absent": row["unexcused_absent"],
+                "attendance_pct": round(attended / total * 100, 2) if total else 0,
+                "punctuality_pct": round(row["present"] / total * 100, 2) if total else 0,
+                "current_score": score,
+                "rating_score": rating_score,
+                "risk_score": risk_score,
+                "status": _student_analytics_status(
+                    score,
+                    total=total,
+                    late=row["late"],
+                    unexcused_absent=row["unexcused_absent"],
+                ),
+            }
+        )
+
+    by_worst = sorted(
+        items,
+        key=lambda item: (
+            item["status"] == "no_data",
+            item["current_score"],
+            -item["unexcused_absent"],
+            -item["late"],
+            item["student_name"].casefold(),
+        ),
+    )
+    by_best = sorted(
+        [item for item in items if item["status"] != "no_data"],
+        key=lambda item: (-item["current_score"], -item["attendance_pct"], item["late"], item["student_name"].casefold()),
+    )
+    return {
+        "period": {"date_from": date_from, "date_to": date_to},
+        "total_students": len(items),
+        "total_marks": sum(item["total_marks"] for item in items),
+        "best": by_best[:limit],
+        "worst": by_worst[:limit],
+        "items": by_worst,
+    }
 
 
 @router.get("/analytics/teachers/compare")
@@ -2902,7 +3184,7 @@ async def teachers_compare(
     if date_from:
         stmt = stmt.where(Lesson.starts_at >= date_from)
     if date_to:
-        stmt = stmt.where(Lesson.starts_at <= date_to)
+        stmt = stmt.where(Lesson.starts_at < _date_end_exclusive(date_to))
     if not _is_admin(current_user):
         group_ids = await _active_tutor_group_ids(session, current_user.id)
         if not group_ids:
@@ -2939,7 +3221,7 @@ async def teachers_timeseries(
             AttendanceRecord.status,
         )
         .join(AttendanceRecord, AttendanceRecord.lesson_id == Lesson.id)
-        .where(Lesson.starts_at >= date_from, Lesson.starts_at <= date_to)
+        .where(Lesson.starts_at >= date_from, Lesson.starts_at < _date_end_exclusive(date_to))
     )
     if teacher_id:
         stmt = stmt.where(Lesson.teacher_id == teacher_id)
@@ -3017,7 +3299,7 @@ async def teacher_groups_analytics(
         .where(
             Lesson.teacher_id == teacher_id,
             Lesson.starts_at >= date_from,
-            Lesson.starts_at <= date_to,
+            Lesson.starts_at < _date_end_exclusive(date_to),
         )
         .group_by(Lesson.group_id)
     )

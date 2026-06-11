@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
@@ -28,6 +29,14 @@ from app.services.notifications import enqueue_notification
 
 settings = get_settings()
 _QR_DEEPLINK_PARAM_NAMES = ("start", "startapp", "startattach")
+
+
+@dataclass(slots=True)
+class _ResolvedQR:
+    lesson: Lesson
+    dynamic_token_hash: str | None = None
+    dynamic_token_expires_at: datetime | None = None
+    dynamic_created_by: UUID | None = None
 
 
 def _hash_token(token: str) -> str:
@@ -220,7 +229,7 @@ def build_dynamic_qr_token(qr_session: QRSession) -> tuple[str, int]:
     return token, slot_index
 
 
-async def _resolve_dynamic_qr_lesson(session: AsyncSession, qr_token: str) -> Lesson | None:
+async def _resolve_dynamic_qr_lesson(session: AsyncSession, qr_token: str) -> _ResolvedQR | None:
     if "." not in qr_token:
         return None
 
@@ -280,10 +289,16 @@ async def _resolve_dynamic_qr_lesson(session: AsyncSession, qr_token: str) -> Le
     if not lesson:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lesson not found")
 
-    return lesson
+    dynamic_token_lifetime = timedelta(seconds=slot_seconds * (grace_slots + 1))
+    return _ResolvedQR(
+        lesson=lesson,
+        dynamic_token_hash=_hash_token(qr_token),
+        dynamic_token_expires_at=min(_as_utc(qr_session.expires_at), now + dynamic_token_lifetime),
+        dynamic_created_by=qr_session.teacher_id,
+    )
 
 
-async def _resolve_static_qr_lesson(session: AsyncSession, qr_token: str) -> Lesson:
+async def _resolve_static_qr_lesson(session: AsyncSession, qr_token: str) -> _ResolvedQR:
     token_hash = _hash_token(qr_token)
     token_stmt = select(QRToken).where(
         QRToken.token_hash == token_hash,
@@ -298,13 +313,13 @@ async def _resolve_static_qr_lesson(session: AsyncSession, qr_token: str) -> Les
     lesson = (await session.execute(lesson_stmt)).scalar_one_or_none()
     if not lesson:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lesson not found")
-    return lesson
+    return _ResolvedQR(lesson=lesson)
 
 
-async def _resolve_lesson_by_qr_token(session: AsyncSession, qr_token: str) -> Lesson:
-    lesson = await _resolve_dynamic_qr_lesson(session, qr_token)
-    if lesson:
-        return lesson
+async def _resolve_lesson_by_qr_token(session: AsyncSession, qr_token: str) -> _ResolvedQR:
+    resolved = await _resolve_dynamic_qr_lesson(session, qr_token)
+    if resolved:
+        return resolved
     return await _resolve_static_qr_lesson(session, qr_token)
 
 
@@ -314,6 +329,7 @@ async def _mark_student_attendance(
     student_id: UUID,
     source: AttendanceSource,
     recipient_telegram_id: int | None = None,
+    qr_resolution: _ResolvedQR | None = None,
 ) -> AttendanceRecord:
     now = utc_now()
     window_start, window_end = _lesson_window(lesson)
@@ -340,6 +356,22 @@ async def _mark_student_attendance(
     existing = (await session.execute(attendance_stmt)).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Already marked")
+
+    if qr_resolution and qr_resolution.dynamic_token_hash:
+        used_token = (
+            await session.execute(select(QRToken.id).where(QRToken.token_hash == qr_resolution.dynamic_token_hash))
+        ).scalar_one_or_none()
+        if used_token:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="QR token already used")
+        session.add(
+            QRToken(
+                lesson_id=lesson.id,
+                token_hash=qr_resolution.dynamic_token_hash,
+                expires_at=qr_resolution.dynamic_token_expires_at or window_end,
+                is_active=False,
+                created_by=qr_resolution.dynamic_created_by or lesson.teacher_id,
+            )
+        )
 
     late_deadline = _as_utc(lesson.starts_at) + timedelta(minutes=lesson.late_threshold_minutes)
     attendance_status = AttendanceStatus.LATE if now > late_deadline else AttendanceStatus.PRESENT
@@ -403,7 +435,8 @@ async def mark_attendance_by_student_qr(
 ) -> AttendanceRecord:
     qr_token = _normalize_qr_token_input(qr_token)
 
-    lesson = await _resolve_lesson_by_qr_token(session, qr_token)
+    qr_resolution = await _resolve_lesson_by_qr_token(session, qr_token)
+    lesson = qr_resolution.lesson
     if recipient_telegram_id is None:
         recipient_telegram_id = (
             await session.execute(select(TelegramAccount.telegram_id).where(TelegramAccount.user_id == student_id))
@@ -415,6 +448,7 @@ async def mark_attendance_by_student_qr(
         student_id=student_id,
         source=AttendanceSource.QR,
         recipient_telegram_id=recipient_telegram_id,
+        qr_resolution=qr_resolution,
     )
 
 

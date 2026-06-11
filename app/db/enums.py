@@ -101,6 +101,7 @@ class AIImportDraftStatus(StrEnum):
 class ExportJobType(StrEnum):
     REPORT = "report"
     RISK_LIST = "risk_list"
+    SCHEDULE = "schedule"
 
 
 class ExportFormat(StrEnum):

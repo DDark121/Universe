@@ -154,6 +154,17 @@ export type ImportJobItem = {
   error_report: Record<string, unknown> | null
 }
 
+export type AdminAssistantMessage = {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export type AdminAssistantReply = {
+  message: string
+  used_faq_ids: string[]
+  status: 'llm' | 'fallback' | string
+}
+
 export type AIImportMode = 'mixed' | 'users' | 'schedule'
 export type AIImportStatus = 'queued' | 'processing' | 'draft' | 'applied' | 'failed' | 'rejected'
 export type AIImportMappingAction = 'match_existing' | 'create_new' | 'unresolved'
@@ -323,6 +334,39 @@ export type TeacherAnalyticsItem = {
   total_marks: number
   lates?: number
   absences?: number
+}
+
+export type StudentAnalyticsItem = {
+  student_id: string
+  student_name: string
+  username: string
+  group_id: string
+  group_code: string
+  group_name: string
+  total_marks: number
+  present: number
+  late: number
+  absent: number
+  excused_absent: number
+  unexcused_absent: number
+  attendance_pct: number
+  punctuality_pct: number
+  current_score: number
+  rating_score: number | null
+  risk_score: number | null
+  status: 'stable' | 'watch' | 'critical' | 'no_data'
+}
+
+export type StudentAnalyticsSummary = {
+  period: {
+    date_from: string
+    date_to: string
+  }
+  total_students: number
+  total_marks: number
+  best: StudentAnalyticsItem[]
+  worst: StudentAnalyticsItem[]
+  items: StudentAnalyticsItem[]
 }
 
 export type TeacherGroupItem = {

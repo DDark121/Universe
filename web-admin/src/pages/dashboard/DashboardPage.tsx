@@ -1,13 +1,41 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
+import { Link } from 'react-router-dom'
 
 import { adminApi } from '@/shared/api/adminApi'
+import type { StudentAnalyticsItem } from '@/shared/api/types'
 import { Card } from '@/shared/ui/Card'
 import { Loader } from '@/shared/ui/Loader'
 import { PageTitle } from '@/shared/ui/PageTitle'
 import { StatBar } from '@/shared/ui/StatBar'
 import { StatCard } from '@/shared/ui/StatCard'
+
+function studentStatusLabel(status: StudentAnalyticsItem['status']) {
+  if (status === 'critical') return 'Критично'
+  if (status === 'watch') return 'Наблюдать'
+  if (status === 'stable') return 'Стабильно'
+  return 'Нет отметок'
+}
+
+function StudentScoreRow({ item, tone }: { item: StudentAnalyticsItem; tone: 'best' | 'worst' }) {
+  return (
+    <Link className={`student-score-row student-score-row-${tone}`} to={`/risk/${item.student_id}`}>
+      <span>
+        <strong>{item.student_name}</strong>
+        <small>
+          {item.group_code} · {studentStatusLabel(item.status)}
+        </small>
+      </span>
+      <span className="student-score-meter">
+        <strong>{item.current_score.toFixed(1)}</strong>
+        <small>
+          {item.attendance_pct.toFixed(0)}% · late {item.late} · abs {item.unexcused_absent}
+        </small>
+      </span>
+    </Link>
+  )
+}
 
 export function DashboardPage() {
   const dateFrom = dayjs().startOf('month').format('YYYY-MM-DD')
@@ -27,6 +55,10 @@ export function DashboardPage() {
     queryKey: ['dashboard-lates', dateFrom, dateTo],
     queryFn: () => adminApi.getLatesReport({ date_from: dateFrom, date_to: dateTo, page_size: '100' }),
   })
+  const studentAnalyticsQuery = useQuery({
+    queryKey: ['dashboard-student-analytics', dateFrom, dateTo],
+    queryFn: () => adminApi.getStudentAnalytics({ date_from: dateFrom, date_to: dateTo, limit: '5' }),
+  })
 
   const loading =
     usersQuery.isLoading ||
@@ -34,7 +66,8 @@ export function DashboardPage() {
     disciplinesQuery.isLoading ||
     riskQuery.isLoading ||
     attendanceQuery.isLoading ||
-    latesQuery.isLoading
+    latesQuery.isLoading ||
+    studentAnalyticsQuery.isLoading
 
   const roleDistribution = useMemo(() => {
     const users = usersQuery.data ?? []
@@ -66,6 +99,11 @@ export function DashboardPage() {
     totalAttendanceEvents === 0
       ? 0
       : Math.round((((attendance?.present ?? 0) + (attendance?.late ?? 0)) / totalAttendanceEvents) * 100)
+  const studentAnalytics = studentAnalyticsQuery.data
+  const scoredStudents = studentAnalytics?.items.filter((item) => item.status !== 'no_data') ?? []
+  const averageStudentScore = scoredStudents.length
+    ? Math.round(scoredStudents.reduce((sum, item) => sum + item.current_score, 0) / scoredStudents.length)
+    : 0
 
   if (loading) {
     return <Loader />
@@ -102,6 +140,10 @@ export function DashboardPage() {
                 <span>Risk-сигналов</span>
                 <strong>{riskQuery.data?.length ?? 0}</strong>
               </div>
+              <div className="report-chip">
+                <span>Студентов</span>
+                <strong>{studentAnalytics?.total_students ?? 0}</strong>
+              </div>
             </div>
           </div>
         </div>
@@ -113,7 +155,53 @@ export function DashboardPage() {
         <StatCard label="Группы" value={groupsQuery.data?.length ?? 0} hint="Учебные контуры, доступные в админке." tone="neutral" />
         <StatCard label="Дисциплины" value={disciplinesQuery.data?.length ?? 0} hint="Активные учебные предметы." tone="warning" />
         <StatCard label="Студенты в риске" value={riskQuery.data?.length ?? 0} hint="Текущая зона внимания по rating/risk." tone="danger" />
+        <StatCard label="Student score" value={averageStudentScore || '-'} hint="Средний текущий score по студентам с отметками." tone="ink" />
       </div>
+
+      <Card>
+        <div className="student-intel-panel">
+          <div className="panel-header">
+            <div>
+              <div className="panel-kicker">Student Pulse</div>
+              <h3>Лучшие и худшие сейчас</h3>
+            </div>
+            <div className="student-intel-summary">
+              <span>{studentAnalytics?.total_marks ?? 0} отметок</span>
+              <strong>{studentAnalytics?.total_students ?? 0} студентов</strong>
+            </div>
+          </div>
+
+          <div className="student-intel-grid">
+            <section className="student-intel-lane">
+              <div className="student-intel-lane-head">
+                <span>В зоне внимания</span>
+                <strong>{studentAnalytics?.worst[0]?.current_score.toFixed(1) ?? '-'}</strong>
+              </div>
+              <div className="student-score-list">
+                {studentAnalytics?.worst.length ? (
+                  studentAnalytics.worst.map((item) => <StudentScoreRow key={item.student_id} item={item} tone="worst" />)
+                ) : (
+                  <div className="dashboard-empty">Нет студентов с отметками за период.</div>
+                )}
+              </div>
+            </section>
+
+            <section className="student-intel-lane">
+              <div className="student-intel-lane-head">
+                <span>Сильнее всех</span>
+                <strong>{studentAnalytics?.best[0]?.current_score.toFixed(1) ?? '-'}</strong>
+              </div>
+              <div className="student-score-list">
+                {studentAnalytics?.best.length ? (
+                  studentAnalytics.best.map((item) => <StudentScoreRow key={item.student_id} item={item} tone="best" />)
+                ) : (
+                  <div className="dashboard-empty">Пока нет устойчивых лидеров за период.</div>
+                )}
+              </div>
+            </section>
+          </div>
+        </div>
+      </Card>
 
       <div className="dashboard-matrix">
         <StatBar

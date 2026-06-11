@@ -17,15 +17,19 @@ import { Tag } from '@/shared/ui/Tag'
 import { Textarea } from '@/shared/ui/Textarea'
 import { useToast } from '@/shared/ui/ToastProvider'
 
-function exportTypeLabel(jobType: 'report' | 'risk_list') {
-  return jobType === 'report' ? 'Отчет' : 'Список риска'
+type ExportJobType = 'report' | 'risk_list' | 'schedule'
+
+function exportTypeLabel(jobType: ExportJobType) {
+  if (jobType === 'report') return 'Отчет'
+  if (jobType === 'schedule') return 'Расписание'
+  return 'Список риска'
 }
 
 export function ExportsPage() {
   const queryClient = useQueryClient()
   const toast = useToast()
 
-  const [jobType, setJobType] = useState<'report' | 'risk_list'>('report')
+  const [jobType, setJobType] = useState<ExportJobType>('report')
   const [format, setFormat] = useState<'csv' | 'xlsx'>('xlsx')
   const [filtersJson, setFiltersJson] = useState('{\n  "report": "attendance"\n}')
 
@@ -36,7 +40,7 @@ export function ExportsPage() {
   })
 
   const createMutation = useMutation({
-    mutationFn: (payload: { job_type: 'report' | 'risk_list'; format: 'csv' | 'xlsx'; filters?: Record<string, unknown> }) =>
+    mutationFn: (payload: { job_type: ExportJobType; format: 'csv' | 'xlsx'; filters?: Record<string, unknown> }) =>
       adminApi.createExport(payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['export-jobs'] })
@@ -107,9 +111,10 @@ export function ExportsPage() {
           <div className="field-grid-compact">
             <label className="field-stack">
               <span className="field-label">Тип выгрузки</span>
-              <Select value={jobType} onChange={(e) => setJobType(e.target.value as 'report' | 'risk_list')}>
+              <Select value={jobType} onChange={(e) => setJobType(e.target.value as ExportJobType)}>
                 <option value="report">Отчет</option>
                 <option value="risk_list">Список риска</option>
+                <option value="schedule">Расписание</option>
               </Select>
             </label>
             <label className="field-stack">

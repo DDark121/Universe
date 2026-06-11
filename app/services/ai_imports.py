@@ -27,6 +27,7 @@ from app.core.logging import get_logger, sanitize_log_data
 from app.core.time import utc_now
 from app.db.enums import AIImportDraftStatus, AIImportMode, LessonStatus, RoleCode
 from app.db.models import AIImportDraft, Discipline, Faculty, Group, Stream, User
+from app.integrations.openrouter_client import OpenRouterError, openrouter_chat_completion
 from app.services.audit import log_audit
 from app.services.import_apply import (
     ensure_student_membership,
@@ -636,28 +637,24 @@ async def _normalize_with_llm(mode: AIImportMode, extracted: ExtractedDocument) 
     if not settings.openrouter_api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured")
 
-    from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_openrouter import ChatOpenRouter
-
-    llm = ChatOpenRouter(
-        api_key=settings.openrouter_api_key,
-        base_url=settings.openrouter_api_base_url,
-        model=settings.ai_import_model,
-        temperature=0,
-        timeout=settings.ai_import_timeout_seconds,
-    )
     messages = [
-        SystemMessage(
-            content=(
+        {
+            "role": "system",
+            "content": (
                 "Ты извлекаешь данные из учебных документов и возвращаешь только корректный JSON. "
                 "Никакого Markdown, никаких комментариев."
-            )
-        ),
-        HumanMessage(content=_llm_prompt(mode, extracted)),
+            ),
+        },
+        {"role": "user", "content": _llm_prompt(mode, extracted)},
     ]
     try:
-        response = await llm.ainvoke(messages)
-    except Exception as exc:
+        text = await openrouter_chat_completion(
+            messages,
+            model=settings.ai_import_model,
+            temperature=0,
+            timeout_seconds=settings.ai_import_timeout_seconds,
+        )
+    except OpenRouterError as exc:
         logger.warning(
             "ai_import_llm_failed",
             file_name=extracted.file_name,
@@ -666,8 +663,6 @@ async def _normalize_with_llm(mode: AIImportMode, extracted: ExtractedDocument) 
         )
         raise RuntimeError("AI normalization request failed") from exc
 
-    content = getattr(response, "content", None)
-    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
     try:
         payload = json.loads(_extract_json_from_text(text))
         return ParsedDocument.model_validate(payload)

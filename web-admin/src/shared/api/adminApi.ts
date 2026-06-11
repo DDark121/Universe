@@ -10,6 +10,8 @@ import type {
   BindingRequestItem,
   DisciplineItem,
   AttendanceReportSummary,
+  AdminAssistantMessage,
+  AdminAssistantReply,
   ExportJobItem,
   FacultyItem,
   GroupItem,
@@ -20,6 +22,7 @@ import type {
   Paged,
   RiskListItem,
   RiskStudentDetail,
+  StudentAnalyticsSummary,
   StreamItem,
   TeacherAnalyticsItem,
   UserItem,
@@ -489,6 +492,11 @@ export const adminApi = {
     return data
   },
 
+  async getStudentAnalytics(params: Record<string, string>) {
+    const { data } = await api.get<StudentAnalyticsSummary>('/admin/analytics/students', { params })
+    return data
+  },
+
   async transferStudent(payload: { student_id: string; target_group_id: string; transfer_date: string }) {
     const { data } = await api.post('/admin/student-transfer', payload)
     return data
@@ -608,6 +616,15 @@ export const adminApi = {
 
   async createTutorBroadcast(payload: { group_id: string; message: string }) {
     const { data } = await api.post('/admin/tutor/broadcasts', payload)
+    return data
+  },
+
+  async askAssistant(payload: {
+    message: string
+    current_path?: string | null
+    history?: AdminAssistantMessage[]
+  }) {
+    const { data } = await api.post<AdminAssistantReply>('/admin/assistant/reply', payload)
     return data
   },
 

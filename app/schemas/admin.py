@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -286,6 +287,23 @@ class StudentTransferRequest(BaseModel):
 class TutorBroadcastRequest(BaseModel):
     group_id: UUID
     message: str = Field(min_length=1, max_length=4000)
+
+
+class AdminAssistantHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class AdminAssistantReplyRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    current_path: str | None = Field(default=None, max_length=200)
+    history: list[AdminAssistantHistoryMessage] = Field(default_factory=list, max_length=12)
+
+
+class AdminAssistantReplyResponse(BaseModel):
+    message: str
+    used_faq_ids: list[UUID]
+    status: str
 
 
 class BiometricDeviceCreateRequest(BaseModel):
